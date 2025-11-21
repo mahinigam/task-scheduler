@@ -10,6 +10,7 @@ import psycopg2
 from psycopg2 import pool
 import redis
 from loguru import logger
+from prometheus_client import start_http_server, Counter
 
 DATABASE_URL = os.getenv('DATABASE_URL', 'postgres://tasks_user:taskspass@localhost:5432/tasksdb')
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
@@ -57,6 +58,13 @@ logger.add(lambda msg: print(msg, end=''), level='INFO', serialize=True)
 
 PRIORITIES = ['high', 'medium', 'low']
 PRIORITY_ZSETS = {'high': 'queue:high', 'medium': 'queue:medium', 'low': 'queue:low'}
+
+# Prometheus metrics for worker
+TASKS_PROCESSED = Counter('worker_tasks_processed_total', 'Total tasks processed by this worker')
+TASKS_SUCCESS = Counter('worker_tasks_success_total', 'Total successful tasks')
+TASKS_FAILURE = Counter('worker_tasks_failure_total', 'Total failed tasks')
+TASKS_RETRIED = Counter('worker_tasks_retried_total', 'Total retried tasks')
+TASKS_DLQ = Counter('worker_tasks_dlq_total', 'Total tasks moved to DLQ')
 
 # Lua script to atomically claim the first ready task from a list of zsets
 # KEYS = ordered zset keys (high -> medium -> low)
@@ -175,6 +183,10 @@ def process_task(task_id):
             pg_pool.putconn(db_conn)
 
     logger.info({'event': 'execute_start', 'task_id': task_id, 'trace': trace, 'worker': WORKER_ID})
+    try:
+        TASKS_PROCESSED.inc()
+    except Exception:
+        pass
 
     # idempotency & mark in_progress
     db_conn = None
@@ -248,6 +260,10 @@ def process_task(task_id):
             if db_conn:
                 pg_pool.putconn(db_conn)
         logger.info({'event': 'execute_success', 'task_id': task_id})
+        try:
+            TASKS_SUCCESS.inc()
+        except Exception:
+            pass
     else:
         # retry logic
         db_conn = None
@@ -266,6 +282,10 @@ def process_task(task_id):
                         c2.execute('INSERT INTO dlq (task_id, user_id, payload, reason) SELECT id, user_id, payload, %s FROM tasks WHERE id=%s', ('max retries exceeded', task_id))
                         db_conn.commit()
                         logger.info({'event': 'moved_dlq', 'task_id': task_id})
+                        try:
+                            TASKS_DLQ.inc()
+                        except Exception:
+                            pass
                     else:
                         # exponential backoff
                         backoff = 2 ** rc
@@ -302,6 +322,10 @@ def process_task(task_id):
                         score = base_ts + p_offset
                         redis_client.zadd(zset, {task_id: score})
                         logger.info({'event': 'scheduled_retry', 'task_id': task_id, 'next_time': str(next_time)})
+                        try:
+                            TASKS_RETRIED.inc()
+                        except Exception:
+                            pass
             except Exception as e:
                 logger.error({'event': 'db_error_retry', 'task_id': task_id, 'error': str(e)})
                 try:
@@ -344,6 +368,13 @@ def main():
     signal.signal(signal.SIGTERM, graceful)
     signal.signal(signal.SIGINT, graceful)
     logger.info({'event': 'worker_start', 'worker': WORKER_ID})
+    # start prometheus metrics server for this worker (port configurable)
+    try:
+        mp = int(os.getenv('WORKER_METRICS_PORT', '8001'))
+        start_http_server(mp)
+        logger.info({'event': 'metrics_server_started', 'port': mp})
+    except Exception:
+        logger.error({'event': 'metrics_start_failed'})
     # start heartbeat thread
     import threading
     hb = threading.Thread(target=heartbeat_loop, daemon=True)

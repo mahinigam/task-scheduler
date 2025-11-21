@@ -4,11 +4,13 @@ import time
 import json
 from datetime import datetime, timezone
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel
 import psycopg2
 from psycopg2 import pool
 import redis
 from loguru import logger
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, Counter
 
 DATABASE_URL = os.getenv('DATABASE_URL', 'postgres://tasks_user:taskspass@localhost:5432/tasksdb')
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
@@ -59,6 +61,19 @@ PRIORITY_ZSETS = {'high': 'queue:high', 'medium': 'queue:medium', 'low': 'queue:
 PRIORITY_OFFSETS = {'high': -0.001, 'medium': 0.0, 'low': 0.001}
 
 
+def _zset_score(exec_time: datetime, priority: str) -> float:
+    try:
+        base_ts = float(exec_time.replace(tzinfo=timezone.utc).timestamp())
+    except Exception:
+        base_ts = float(time.time())
+    offset = PRIORITY_OFFSETS.get(priority, 0.0)
+    return base_ts + offset
+
+
+# Prometheus metrics
+TASKS_SUBMITTED = Counter('tasks_submitted_total', 'Total tasks submitted')
+
+
 class TaskIn(BaseModel):
     user_id: str
     payload: dict
@@ -93,16 +108,24 @@ def token_bucket_allow(user_id: str, capacity=50, refill_per_min=50):
         return 1
     end
     """
-    allowed = redis_client.eval(script, 1, key, capacity, refill_per_min, now)
-    return bool(allowed)
+    try:
+        allowed_raw = redis_client.eval(script, 1, key, capacity, refill_per_min, now)
+    except Exception as e:
+        logger.error({'event': 'redis_error_token_bucket', 'user_id': user_id, 'error': str(e)})
+        return False
+    try:
+        return bool(int(allowed_raw))
+    except Exception:
+        return bool(allowed_raw)
 
 
 @app.post('/tasks')
 def submit_task(task: TaskIn, request: Request):
     trace_id = request.headers.get('X-Trace-Id', str(uuid.uuid4()))
-    logger.bind(trace_id=trace_id).info('submit_request', extra={'user': task.user_id})
+    priority = task.priority.lower()
+    logger.info({'event': 'submit_request', 'user': task.user_id, 'priority': priority, 'trace': trace_id})
 
-    if task.priority.lower() not in PRIORITY_ZSETS:
+    if priority not in PRIORITY_ZSETS:
         raise HTTPException(status_code=400, detail='invalid priority')
 
     if not token_bucket_allow(task.user_id):
@@ -118,7 +141,7 @@ def submit_task(task: TaskIn, request: Request):
             with db_conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO tasks (id, user_id, payload, priority, exec_time, status, retry_count, trace_id) VALUES (%s,%s,%s,%s,%s,'pending',0,%s)",
-                    (task_id, task.user_id, payload_json, task.priority.lower(), task.exec_time, trace_id)
+                    (task_id, task.user_id, payload_json, priority, task.exec_time, trace_id)
                 )
                 db_conn.commit()
         except Exception as e:
@@ -132,21 +155,42 @@ def submit_task(task: TaskIn, request: Request):
     finally:
         pg_pool.putconn(db_conn)
 
-    # push to Redis priority zset with score=exec_time epoch (float).
-    # Use a tiny priority offset so tasks with identical exec_time are ordered by priority.
-    base_ts = float(task.exec_time.replace(tzinfo=timezone.utc).timestamp())
-    offset = PRIORITY_OFFSETS.get(task.priority.lower(), 0.0)
-    score = base_ts + offset
-    zset = PRIORITY_ZSETS[task.priority.lower()]
-    redis_client.zadd(zset, {task_id: score})
+    # push to Redis priority zset with score computed by helper
+    score = _zset_score(task.exec_time, priority)
+    zset = PRIORITY_ZSETS[priority]
+    try:
+        redis_client.zadd(zset, {task_id: score})
+    except Exception as e:
+        logger.error({'event': 'redis_zadd_error', 'task_id': task_id, 'error': str(e)})
+        raise HTTPException(status_code=500, detail='failed to enqueue task')
 
-    logger.bind(trace_id=trace_id).info('task_created', extra={'task_id': task_id, 'priority': task.priority})
+    # metrics
+    try:
+        TASKS_SUBMITTED.inc()
+    except Exception:
+        pass
+
+    logger.info({'event': 'task_created', 'task_id': task_id, 'priority': priority, 'trace': trace_id})
     return {'task_id': task_id, 'trace_id': trace_id}
+
+
+
+@app.get('/metrics')
+def metrics():
+    # Prometheus scrape endpoint
+    data = generate_latest()
+    return Response(content=data, media_type=CONTENT_TYPE_LATEST)
 
 
 @app.on_event('shutdown')
 def shutdown_event():
     try:
         pg_pool.closeall()
+    except Exception:
+        pass
+
+    try:
+        if hasattr(redis_client, 'close'):
+            redis_client.close()
     except Exception:
         pass
