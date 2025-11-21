@@ -2,7 +2,7 @@
 
 A production-grade distributed task scheduler built with **FastAPI**, **Redis**, and **PostgreSQL**. This system is designed to handle high-concurrency task scheduling with priority queues, fault tolerance, and horizontal scalability.
 
-## 🚀 Features
+## Features
 
 ### Core Functionality
 - **Task Submission API**: REST endpoint to submit tasks with execution estimates and priority levels.
@@ -19,7 +19,7 @@ A production-grade distributed task scheduler built with **FastAPI**, **Redis**,
 - **Heartbeat & Reclamation**: Workers periodically ping Redis. If a worker dies, a reclaimer process detects the missing heartbeat and re-queues its in-flight tasks.
 - **Structured Logging**: JSON logs with Trace IDs for end-to-end request tracking.
 
-## 🛠 Tech Stack
+## Tech Stack
 
 - **Language**: Python 3.11
 - **API Framework**: FastAPI
@@ -27,7 +27,7 @@ A production-grade distributed task scheduler built with **FastAPI**, **Redis**,
 - **Broker/Queue**: Redis (Priority Queues, Rate Limiting, Coordination)
 - **Containerization**: Docker & Docker Compose
 
-## 🏁 Getting Started
+## Getting Started
 
 ### Prerequisites
 - Docker & Docker Compose
@@ -59,7 +59,7 @@ A verification script is included to demonstrate priority queueing and rate limi
    - Submit low priority tasks followed by high priority tasks (verifying High is processed first).
    - Spam the API with requests to trigger and verify the Rate Limiter.
 
-## 📡 API Usage
+## API Usage
 
 ### Submit a Task
 
@@ -92,7 +92,7 @@ A verification script is included to demonstrate priority queueing and rate limi
 }
 ```
 
-## 📂 Project Structure
+## Project Structure
 
 ```
 .
@@ -108,7 +108,7 @@ A verification script is included to demonstrate priority queueing and rate limi
 └── verification_script.py # E2E test script
 ```
 
-## 🧠 Design Decisions
+## Design Decisions
 
 - **Redis ZSET for Priority**: We use the priority score (High=1, Medium=2, Low=3) as the ZSET score. `ZPOPMIN` (via Lua) ensures the highest priority (lowest score) is always fetched first.
 - **Lua for Atomicity**: Both the Rate Limiter and the Task Fetching logic use Lua scripts to ensure operations are atomic and race-condition free.
