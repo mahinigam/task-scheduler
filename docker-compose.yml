@@ -1,44 +1,61 @@
 version: '3.8'
+
 services:
-  postgres:
-    image: postgres:15
-    environment:
-      POSTGRES_DB: tasksdb
-      POSTGRES_USER: tasks_user
-      POSTGRES_PASSWORD: taskspass
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-
-  redis:
-    image: redis:7
-    ports:
-      - "6379:6379"
-
   api:
-    build: .
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
-    environment:
-      DATABASE_URL: postgres://tasks_user:taskspass@postgres:5432/tasksdb
-      REDIS_URL: redis://redis:6379/0
+    build:
+      context: .
+      dockerfile: Dockerfile.api
     ports:
       - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://user:password@postgres:5432/scheduler
+      - REDIS_URL=redis://redis:6379/0
     depends_on:
       - postgres
       - redis
+    networks:
+      - scheduler_net
 
   worker:
-    build: .
-    command: python worker/worker.py
-    environment:
-      DATABASE_URL: postgres://tasks_user:taskspass@postgres:5432/tasksdb
-      REDIS_URL: redis://redis:6379/0
-    depends_on:
-      - redis
-      - postgres
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
     deploy:
       replicas: 2
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://user:password@postgres:5432/scheduler
+      - REDIS_URL=redis://redis:6379/0
+      - WORKER_ID_PREFIX=worker
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - scheduler_net
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=scheduler
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - scheduler_net
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - scheduler_net
+
+networks:
+  scheduler_net:
+    driver: bridge
 
 volumes:
-  pgdata:
+  postgres_data:

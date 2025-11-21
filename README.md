@@ -31,3 +31,29 @@ POST to http://localhost:8000/tasks with JSON body:
 
 Notes:
 - The prototype focuses on demonstrating the requested features: priority queueing, idempotency, retries, DLQ, rate limiting, graceful shutdown, structured JSON logging, and heartbeat/reclaim.
+
+Quick commands (developer convenience)
+
+Use the provided Makefile targets or helper script to standardize setup and smoke tests:
+
+```bash
+# create a Python 3.11 virtualenv and install deps
+make venv
+make install
+
+# build and start the stack
+make up
+
+# run tests (inside the api container)
+make test
+
+# a smoke test: enqueue low then high (same exec_time) and show worker logs
+make smoke
+
+# or run the all-in-one helper
+./scripts/setup_and_run.sh
+```
+
+Notes
+- The `Makefile` and `scripts/setup_and_run.sh` expect `python3.11` to be available on your PATH.
+- For integration tests and local stack runs, Docker Desktop / Docker Compose is required.

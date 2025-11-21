@@ -1,0 +1,17 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY worker/ ./worker/
+COPY app/database.py ./app/database.py
+COPY app/models.py ./app/models.py
+
+# We need to make sure the worker can import from app if needed, or we structure it so common code is shared.
+# For simplicity in this structure, I'll copy the necessary app files or adjust PYTHONPATH.
+# Setting PYTHONPATH to include current directory
+ENV PYTHONPATH=/app
+
+CMD ["python", "-m", "worker.main"]

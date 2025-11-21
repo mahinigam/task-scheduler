@@ -106,7 +106,18 @@ def reclaim_dead_workers():
         if not redis_client.exists(hb_key):
             # reclaim tasks
             tids = redis_client.smembers(wtk) or []
-            for tid in tids:
+            for tid in list(tids):
+                # defensive: ignore non-UUID entries which can appear in Redis
+                try:
+                    uuid.UUID(tid)
+                except Exception:
+                    # remove noisy/non-conforming entry and its metadata, continue
+                    try:
+                        redis_client.srem(wtk, tid)
+                        redis_client.delete('processing:' + tid)
+                    except Exception:
+                        pass
+                    continue
                 # read processing metadata
                 meta = redis_client.hgetall('processing:' + tid)
                 # push back to appropriate zset using exec_time from DB
