@@ -1,0 +1,44 @@
+version: '3.8'
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: tasksdb
+      POSTGRES_USER: tasks_user
+      POSTGRES_PASSWORD: taskspass
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    environment:
+      DATABASE_URL: postgres://tasks_user:taskspass@postgres:5432/tasksdb
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+
+  worker:
+    build: .
+    command: python worker/worker.py
+    environment:
+      DATABASE_URL: postgres://tasks_user:taskspass@postgres:5432/tasksdb
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
+      - postgres
+    deploy:
+      replicas: 2
+
+volumes:
+  pgdata:
