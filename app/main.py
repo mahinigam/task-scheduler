@@ -6,17 +6,24 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
 import psycopg2
+from psycopg2 import pool
 import redis
 from loguru import logger
 
 DATABASE_URL = os.getenv('DATABASE_URL', 'postgres://tasks_user:taskspass@localhost:5432/tasksdb')
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 
+DB_POOL_MIN = int(os.getenv('DB_POOL_MIN', '1'))
+DB_POOL_MAX = int(os.getenv('DB_POOL_MAX', '5'))
+
+
 def wait_for_postgres(dsn, retries=30, delay=1):
     for i in range(retries):
         try:
+            # test connection
             conn = psycopg2.connect(dsn)
-            return conn
+            conn.close()
+            return True
         except Exception as e:
             print(f"Postgres not ready ({i+1}/{retries}): {e}")
             time.sleep(delay)
@@ -35,8 +42,11 @@ def wait_for_redis(url, retries=30, delay=1):
     raise RuntimeError('Redis not available')
 
 
-conn = wait_for_postgres(DATABASE_URL)
+_ = wait_for_postgres(DATABASE_URL)
 redis_client = wait_for_redis(REDIS_URL)
+
+# initialize a simple connection pool
+pg_pool = pool.SimpleConnectionPool(DB_POOL_MIN, DB_POOL_MAX, DATABASE_URL)
 
 app = FastAPI()
 
@@ -44,6 +54,9 @@ logger.remove()
 logger.add(lambda msg: print(msg, end=''), level='INFO', serialize=True)
 
 PRIORITY_ZSETS = {'high': 'queue:high', 'medium': 'queue:medium', 'low': 'queue:low'}
+# small numeric offsets to break ties when exec_time is identical
+# higher priority should sort earlier (smaller score)
+PRIORITY_OFFSETS = {'high': -0.001, 'medium': 0.0, 'low': 0.001}
 
 
 class TaskIn(BaseModel):
@@ -99,17 +112,41 @@ def submit_task(task: TaskIn, request: Request):
     payload_json = json.dumps(task.payload)
 
     # insert into Postgres (persist trace_id for end-to-end tracing)
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO tasks (id, user_id, payload, priority, exec_time, status, retry_count, trace_id) VALUES (%s,%s,%s,%s,%s,'pending',0,%s)",
-            (task_id, task.user_id, payload_json, task.priority.lower(), task.exec_time, trace_id)
-        )
-        conn.commit()
+    db_conn = pg_pool.getconn()
+    try:
+        try:
+            with db_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO tasks (id, user_id, payload, priority, exec_time, status, retry_count, trace_id) VALUES (%s,%s,%s,%s,%s,'pending',0,%s)",
+                    (task_id, task.user_id, payload_json, task.priority.lower(), task.exec_time, trace_id)
+                )
+                db_conn.commit()
+        except Exception as e:
+            # rollback and re-raise so API surface returns error
+            try:
+                db_conn.rollback()
+            except Exception:
+                pass
+            logger.error({'event': 'db_error_insert', 'error': str(e), 'task_id': task_id})
+            raise HTTPException(status_code=500, detail='internal db error')
+    finally:
+        pg_pool.putconn(db_conn)
 
-    # push to Redis priority zset with score=exec_time epoch
-    score = int(task.exec_time.replace(tzinfo=timezone.utc).timestamp())
+    # push to Redis priority zset with score=exec_time epoch (float).
+    # Use a tiny priority offset so tasks with identical exec_time are ordered by priority.
+    base_ts = float(task.exec_time.replace(tzinfo=timezone.utc).timestamp())
+    offset = PRIORITY_OFFSETS.get(task.priority.lower(), 0.0)
+    score = base_ts + offset
     zset = PRIORITY_ZSETS[task.priority.lower()]
     redis_client.zadd(zset, {task_id: score})
 
     logger.bind(trace_id=trace_id).info('task_created', extra={'task_id': task_id, 'priority': task.priority})
     return {'task_id': task_id, 'trace_id': trace_id}
+
+
+@app.on_event('shutdown')
+def shutdown_event():
+    try:
+        pg_pool.closeall()
+    except Exception:
+        pass

@@ -1,5 +1,4 @@
 import time
-import uuid
 import redis
 
 
