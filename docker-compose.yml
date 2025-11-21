@@ -8,10 +8,9 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://user:password@postgres:5432/scheduler
-      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
     depends_on:
-      - postgres
       - redis
     networks:
       - scheduler_net
@@ -23,11 +22,10 @@ services:
     deploy:
       replicas: 2
     environment:
-      - DATABASE_URL=postgresql+asyncpg://user:password@postgres:5432/scheduler
-      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
       - WORKER_ID_PREFIX=worker
     depends_on:
-      - postgres
       - redis
     networks:
       - scheduler_net
