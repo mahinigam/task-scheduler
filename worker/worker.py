@@ -13,8 +13,31 @@ from loguru import logger
 DATABASE_URL = os.getenv('DATABASE_URL', 'postgres://tasks_user:taskspass@localhost:5432/tasksdb')
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 
-conn = psycopg2.connect(DATABASE_URL)
-redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+def wait_for_postgres(dsn, retries=30, delay=1):
+    for i in range(retries):
+        try:
+            conn = psycopg2.connect(dsn)
+            return conn
+        except Exception as e:
+            print(f"Postgres not ready ({i+1}/{retries}): {e}")
+            time.sleep(delay)
+    raise RuntimeError('Postgres not available')
+
+
+def wait_for_redis(url, retries=30, delay=1):
+    for i in range(retries):
+        try:
+            client = redis.Redis.from_url(url, decode_responses=True)
+            client.ping()
+            return client
+        except Exception as e:
+            print(f"Redis not ready ({i+1}/{retries}): {e}")
+            time.sleep(delay)
+    raise RuntimeError('Redis not available')
+
+
+conn = wait_for_postgres(DATABASE_URL)
+redis_client = wait_for_redis(REDIS_URL)
 
 WORKER_ID = str(uuid.uuid4())
 STOP = False
@@ -97,7 +120,14 @@ def graceful(signum, frame):
 
 
 def process_task(task_id):
+    # try to use original trace_id from tasks table for end-to-end tracing
     trace = str(uuid.uuid4())
+    with conn.cursor() as cur:
+        cur.execute('SELECT trace_id FROM tasks WHERE id=%s', (task_id,))
+        r = cur.fetchone()
+        if r and r[0]:
+            trace = r[0]
+
     logger.info({'event':'execute_start','task_id':task_id,'trace':trace,'worker':WORKER_ID})
     with conn.cursor() as cur:
         # idempotency: check status
@@ -121,11 +151,12 @@ def process_task(task_id):
     with conn.cursor() as cur:
         cur.execute('INSERT INTO execution_logs (task_id, started_at, finished_at, success, error, attempt) VALUES (%s, now(), now(), %s, %s, %s)',
                     (task_id, success, None if success else 'simulated failure', retry_count+1))
-        if success:
-            cur.execute('UPDATE tasks SET status=%s, updated_at=now() WHERE id=%s', ('done', task_id))
+    if success:
+        with conn.cursor() as cur2:
+            cur2.execute('UPDATE tasks SET status=%s, updated_at=now() WHERE id=%s', ('done', task_id))
             conn.commit()
-            logger.info({'event':'execute_success','task_id':task_id})
-        else:
+        logger.info({'event':'execute_success','task_id':task_id})
+    else:
             # retry logic
             with conn.cursor() as c2:
                 c2.execute('SELECT retry_count, max_retries FROM tasks WHERE id=%s', (task_id,))
@@ -149,7 +180,11 @@ def process_task(task_id):
                     zset = PRIORITY_ZSETS.get('medium', 'queue:medium')
                     # prefer original priority
                     c2.execute('SELECT priority FROM tasks WHERE id=%s', (task_id,))
-                    p = c2.fetchone()[0]
+                    prow = c2.fetchone()
+                    if prow and prow[0]:
+                        p = prow[0]
+                    else:
+                        p = 'medium'
                     zset = PRIORITY_ZSETS.get(p, zset)
                     redis_client.zadd(zset, {task_id: int(next_time.replace(tzinfo=timezone.utc).timestamp())})
                     logger.info({'event':'scheduled_retry','task_id':task_id,'next_time':str(next_time)})

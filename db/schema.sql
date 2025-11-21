@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     id UUID PRIMARY KEY,
     user_id TEXT NOT NULL,
     payload JSONB NOT NULL,
+    trace_id TEXT,
     priority TEXT NOT NULL CHECK (priority IN ('high','medium','low')),
     exec_time TIMESTAMP WITH TIME ZONE NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('pending','in_progress','done','failed','dlq')) DEFAULT 'pending',

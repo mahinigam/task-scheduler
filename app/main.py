@@ -12,8 +12,31 @@ from loguru import logger
 DATABASE_URL = os.getenv('DATABASE_URL', 'postgres://tasks_user:taskspass@localhost:5432/tasksdb')
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 
-conn = psycopg2.connect(DATABASE_URL)
-redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+def wait_for_postgres(dsn, retries=30, delay=1):
+    for i in range(retries):
+        try:
+            conn = psycopg2.connect(dsn)
+            return conn
+        except Exception as e:
+            print(f"Postgres not ready ({i+1}/{retries}): {e}")
+            time.sleep(delay)
+    raise RuntimeError('Postgres not available')
+
+
+def wait_for_redis(url, retries=30, delay=1):
+    for i in range(retries):
+        try:
+            client = redis.Redis.from_url(url, decode_responses=True)
+            client.ping()
+            return client
+        except Exception as e:
+            print(f"Redis not ready ({i+1}/{retries}): {e}")
+            time.sleep(delay)
+    raise RuntimeError('Redis not available')
+
+
+conn = wait_for_postgres(DATABASE_URL)
+redis_client = wait_for_redis(REDIS_URL)
 
 app = FastAPI()
 
@@ -75,11 +98,11 @@ def submit_task(task: TaskIn, request: Request):
     task_id = str(uuid.uuid4())
     payload_json = json.dumps(task.payload)
 
-    # insert into Postgres
+    # insert into Postgres (persist trace_id for end-to-end tracing)
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO tasks (id, user_id, payload, priority, exec_time, status, retry_count) VALUES (%s,%s,%s,%s,%s,'pending',0)",
-            (task_id, task.user_id, payload_json, task.priority.lower(), task.exec_time)
+            "INSERT INTO tasks (id, user_id, payload, priority, exec_time, status, retry_count, trace_id) VALUES (%s,%s,%s,%s,%s,'pending',0,%s)",
+            (task_id, task.user_id, payload_json, task.priority.lower(), task.exec_time, trace_id)
         )
         conn.commit()
 
