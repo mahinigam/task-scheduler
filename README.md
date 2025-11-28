@@ -300,6 +300,12 @@ Workers periodically update a heartbeat key in Redis (`worker:heartbeat:{worker_
 - **Task Scheduling**: Support cron-like scheduled tasks
 - **Webhooks**: Notify external services upon task completion/failure
 
+## CI/CD Pipeline
+
+This project uses **GitHub Actions** for continuous deployment.
+- **Trigger**: Push to `master` branch
+- **Action**: Automatically SSHs into the AWS EC2 instance, pulls the latest code, and rebuilds the Docker containers.
+
 ## License
 
 MIT License - See LICENSE file for details
