@@ -145,14 +145,15 @@ async def submit_task(task: TaskCreate, request: Request):
     async with engine.begin() as conn:
         await conn.execute(
             text("""
-                INSERT INTO tasks (id, payload, priority, status)
-                VALUES (:id, :payload, :priority, :status)
+                INSERT INTO tasks (id, payload, priority, status, execution_time)
+                VALUES (:id, :payload, :priority, :status, :execution_time)
             """),
             {
                 "id": task_id,
                 "payload": json.dumps(task.payload),
                 "priority": task.priority.value,
-                "status": TaskStatus.PENDING.value
+                "status": TaskStatus.PENDING.value,
+                "execution_time": task.execution_time
             }
         )
     

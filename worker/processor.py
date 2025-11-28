@@ -86,7 +86,7 @@ class TaskProcessor:
         task_data = None
         async with engine.begin() as conn:
             result = await conn.execute(
-                text("SELECT payload, priority FROM tasks WHERE id = :id"),
+                text("SELECT payload, priority, execution_time FROM tasks WHERE id = :id"),
                 {"id": task_id}
             )
             task_data = result.fetchone()
@@ -108,7 +108,8 @@ class TaskProcessor:
             await self.cleanup_task(task_id)
             return
 
-        payload = task_data[0] # payload is JSONB, so it comes as dict or string depending on driver
+        payload = task_data[0] # payload is JSONB
+        execution_time = task_data[2] if task_data[2] is not None else 1.0
         
         # 2. Execute Task (Simulate work & failure)
         success = False
@@ -118,7 +119,7 @@ class TaskProcessor:
         while retries <= max_retries:
             try:
                 # Simulate execution time
-                await asyncio.sleep(random.uniform(0.5, 2.0))
+                await asyncio.sleep(execution_time)
                 
                 # Simulate random failure (20% chance)
                 if random.random() < 0.2:
